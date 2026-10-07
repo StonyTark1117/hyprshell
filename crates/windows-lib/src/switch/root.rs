@@ -254,8 +254,22 @@ impl SwitchRoot {
         };
         let key_controller = EventControllerKey::new();
         let event_sender = sender.clone();
-        key_controller.connect_key_pressed(move |_, key, _, state| {
+        key_controller.connect_key_pressed(move |controller, key, keycode, state| {
             trace!("Key pressed: {key:?}");
+            let unshifted = state
+                .contains(ModifierType::SHIFT_MASK)
+                .then(|| {
+                    let event = controller.current_event()?;
+                    let event = event.downcast_ref::<gtk::gdk::KeyEvent>()?;
+                    let group = i32::try_from(event.layout()).ok()?;
+                    controller
+                        .widget()?
+                        .display()
+                        .translate_key(keycode, state & !ModifierType::SHIFT_MASK, group)
+                        .map(|(base, _, _, _)| base)
+                })
+                .flatten();
+            let key = shifted_forward_key(key, unshifted, state, &forward);
             handle_key(key, state, &forward, &reverse, kill_key, &event_sender)
         });
         if let Some(controller) = self.controller.take() {
@@ -773,6 +787,24 @@ fn handle_key(
     }
 }
 
+fn shifted_forward_key(
+    key: Key,
+    unshifted: Option<Key>,
+    state: ModifierType,
+    forward: &[Key],
+) -> Key {
+    if state.contains(ModifierType::SHIFT_MASK)
+        && let Some(base) = unshifted
+        && let Some(candidate) = forward.iter().find(|candidate| {
+            **candidate == base || (**candidate == Key::grave && base == Key::dead_grave)
+        })
+    {
+        *candidate
+    } else {
+        key
+    }
+}
+
 fn shortcut_direction(
     key: Key,
     state: ModifierType,
@@ -855,6 +887,26 @@ mod shortcut_tests {
             shortcut_direction(Key::A, ModifierType::SHIFT_MASK, &[Key::a], &[]),
             Some(Direction::Left)
         );
+    }
+
+    #[test]
+    fn shifted_punctuation_uses_only_configured_forward_keys() {
+        let state = ModifierType::SHIFT_MASK;
+        for (shifted, base) in [(Key::exclam, Key::_1), (Key::asciitilde, Key::grave)] {
+            let normalized = shifted_forward_key(shifted, Some(base), state, &[base]);
+            assert_eq!(
+                shortcut_direction(normalized, state, &[base], &[]),
+                Some(Direction::Left)
+            );
+            assert_eq!(
+                shifted_forward_key(shifted, Some(base), state, &[Key::Tab]),
+                shifted
+            );
+            assert_eq!(
+                shifted_forward_key(shifted, Some(base), ModifierType::empty(), &[base]),
+                shifted
+            );
+        }
     }
 }
 
